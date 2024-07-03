@@ -50,7 +50,7 @@ def check_missing_or_dupes(files):
 	next_index = 1
 	for file in files:
 		if file['index'] in ids:
-			raise Exception(f'Index {file['index']} exists twice')
+			raise Exception(f'Index {file["index"]} exists twice')
 		if file['index'] != next_index:
 			raise Exception(f'Skipped index {next_index}')
 		next_index += 1
