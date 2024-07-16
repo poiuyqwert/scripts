@@ -1,5 +1,6 @@
 
 import sys, re, os, subprocess
+from typing import Callable
 
 args = list(sys.argv)
 if args[0].endswith('.py'):
@@ -12,20 +13,19 @@ if not os.path.exists(path):
 
 execute = args[-1] == '-e'
 
-def tracks_from_cue(cue_path):
-    with open(cue_path, 'r') as f:
-        cue = f.read()
+def fix_endings(tracks, duration):
+    for n in range(len(tracks)-1):
+        tracks[n]['end'] = tracks[n+1]['start']
+    tracks[-1]['end'] = duration
+    return tracks
 
-    RE_TRACK = re.compile(r'TRACK (\d+) AUDIO\s*TITLE "([^"]+)".+?(\d+):(\d+):(\d+)', re.S)
+def parse_cue(cue):
+    RE_TRACK = re.compile(r'TRACK (\d+) AUDIO\s+(?:: +)?TITLE "([^"]+)"\s+(?:: +)?INDEX \d+ (\d+):(\d+):(\d+)', re.S)
 
     tracks = []
     for match in RE_TRACK.finditer(cue):
-        index, title, minutes, seconds, milliseconds = match.groups()
-        # minutes, seconds, milliseconds = int(minutes), int(seconds), int(milliseconds)
-        # hours = int(minutes / 60)
-        # minutes = minutes % 60
-        # print('%02d:%02d:%02d - %s' % (hours, minutes, seconds, title))
-        start_seconds = int(minutes) * 60 + int(seconds)
+        index, title, minutes, seconds, frames = match.groups()
+        start_seconds = int(minutes) * 60 + int(seconds) #+ int(frames) / 75.0
         tracks.append({
             'index': int(index),
             'start': float(start_seconds),
@@ -34,12 +34,18 @@ def tracks_from_cue(cue_path):
         })
     return tracks
 
-def tracks_from_ffprobe(m4b_path):
+def tracks_from_cue(cue_path):
+    with open(cue_path, 'r') as f:
+        cue = f.read()
+
+    return parse_cue(cue)
+
+def tracks_from_m4b(m4b_path):
     command = ['ffprobe', m4b_path]
     result = subprocess.run(command, capture_output=True, text=True)
     probe = result.stdout or result.stderr
 
-    RE_TRACK = re.compile(r'Chapter #0:(\d+): start ([\d\.]+), end ([\d\.]+).+?title\s+:\s+([^\n]+)', re.S)
+    RE_TRACK = re.compile(r'Chapter #0:(\d+): start ([\d\.]+), end ([\d\.]+)[^:]+?:\s+title +: +([^\n]+)?', re.S)
 
     tracks = []
     for match in RE_TRACK.finditer(probe):
@@ -48,20 +54,30 @@ def tracks_from_ffprobe(m4b_path):
             'index': int(index),
             'start': float(start_seconds),
             'end': float(end_seconds),
-            'title': title
+            'title': title or 'NA'
         })
+    return tracks
+
+def tracks_from_mp3(mp3_path):
+    command = ['ffprobe', mp3_path]
+    result = subprocess.run(command, capture_output=True, text=True)
+    probe = result.stdout or result.stderr
+
+    cue_path = os.path.splitext(path)[0] + os.extsep + 'cue'
+    if os.path.exists(cue_path):
+        tracks = tracks_from_cue(cue_path)
+    else:
+        tracks = parse_cue(probe)
+
+    RE_DURATION = re.compile(r'^ +Duration: (\d+):(\d+):(\d+)', re.M)
+    match = RE_DURATION.search(probe)
+    duration = (int(match.group(1)) * 60 + int(match.group(2))) * 60 + int(match.group(3))
+
+    tracks = fix_endings(tracks, duration)
     return tracks
 
 def sort(tracks):
     return sorted(tracks, key=lambda track: track['index'])
-
-def fix_endings(only_empty=False):
-    def fix_endings(tracks):
-        for n in range(len(tracks)-1):
-            tracks[n]['end'] = tracks[n+1]['start']
-        tracks[-1]['end'] = None
-        return tracks
-    return fix_endings
 
 def set_titles(titles):
     def set_titles_(tracks):
@@ -142,20 +158,40 @@ class TSet(Titleizer):
     def update(self, track):
         track['title'] = self.title
         return track
-class TNumber(Titleizer):
-    def __init__(self, prefix='Chapter', number=1):
-        self.prefix = prefix
+class Counter:
+    def __init__(self, number=1):
         self.number = number
+    def touch(self):
+        number = self.number
+        self.number += 1
+        return number
+class TNumber(Titleizer):
+    def __init__(self, prefix='Chapter', counter=Counter()):
+        self.prefix = prefix
+        self.counter = counter
     def match(self, track, count):
         return True
     def update(self, track):
-        track['title'] = f'{self.prefix} {self.number}'
-        self.number += 1
+        track['title'] = f'{self.prefix} {self.counter.touch()}'
+        return track
+class TTransform(Titleizer):
+    def __init__(self, title_transform: Callable[[str], str] | None = None, index: int | None = None):
+        self.title_transform = title_transform
+        self.index = index
+    def match(self, track, count):
+        if self.index == None:
+            return True
+        if self.index < 0:
+            self.index += count
+        return track['index'] == self.index
+    def update(self, track):
+        if self.title_transform:
+            track['title'] = self.title_transform(track['title'])
         return track
 def titleize(defs: list[Titleizer]):
-    def titleize_(tracks):
+    def titleize_(tracks: list[dict]) -> list[dict]:
         active: Titleizer | None = None
-        next: Titleizer = defs.pop(0)
+        next: Titleizer | None = defs.pop(0)
         for n in range(len(tracks)):
             track = tracks[n]
             if next and next.match(track, len(tracks)):
@@ -171,6 +207,12 @@ def only_keep(indexes, offset=1):
         return list(track for track in tracks if track['index']+offset in indexes)
     return only_keep_
 
+def drop(indexes, offset=1):
+    def drop_(tracks):
+        ids = list((i if i > 0 else i + len(tracks)) for i in indexes)
+        return list(track for track in tracks if track['index']-offset not in ids)
+    return drop_
+
 def trim(seconds):
     def trim_(tracks):
         if seconds < 0:
@@ -180,26 +222,60 @@ def trim(seconds):
         return tracks
     return trim_
 
+def trim_track(track_n: int, seconds: float):
+    def trim_track_(tracks):
+        if seconds < 0:
+            tracks[track_n]['end'] += seconds
+        else:
+            tracks[track_n]['start'] += seconds
+        return tracks
+    return trim_track_
+
+def split_track(track_n: int, seconds: float, title1: str | None = None, title2: str | None = None):
+    def split_track_(tracks):
+        new_track = dict(tracks[track_n])
+        if seconds < 0:
+            new_track['end'] += seconds
+        else:
+            new_track['end'] = new_track['start'] + seconds
+        if title1:
+            new_track['title'] = title1
+        if seconds < 0:
+            tracks[track_n]['start'] = tracks[track_n]['end'] + seconds
+        else:
+            tracks[track_n]['start'] += seconds
+        if title2:
+            tracks[track_n]['title'] = title2
+        tracks.insert(track_n, new_track)
+        return tracks
+    return split_track_
+
+def shift(track_n: int, seconds: float):
+    def shift_(tracks):
+        if seconds < 0:
+            tracks[track_n+1]['start'] += seconds
+            tracks[track_n]['end'] += seconds
+        else:
+            tracks[track_n-1]['end'] += seconds
+            tracks[track_n]['start'] += seconds
+        return tracks
+    return shift_
+
+counter = Counter()
 modifiers = [
     sort,
-    # fix_endings(),
-    add_split(26),
-    trim(2)
-    # add_split(36),
-    # add_split(secs(5,51,45) - 52),
-    # trim(4),
-    # reindex,
-    # titleize([
-    #     TSet('Intro'),
-    #     TSet('Preface'),
-    #     TNumber(),
-    #     TSet('Outro', -1)
-    # ]),
-    # only_keep([38])
+    trim(3),
+    trim(-2),
+    shift(3, 1),
+    shift(28, 1),
+    only_keep([28,29])
 ]
 
-tracks = tracks_from_ffprobe(path)
-# tracks = tracks_from_cue(path)
+if path.endswith('m4b'):
+    tracks = tracks_from_m4b(path)
+else:
+    tracks = tracks_from_mp3(path)
+
 for modifier in modifiers:
     tracks = modifier(tracks)
 
