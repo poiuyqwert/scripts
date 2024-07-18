@@ -102,16 +102,14 @@ def join_short(min_dur):
         return tracks
     return join_short_
 
-def concat_tracks(indexes):
-    def concat_track_(tracks):
-        o = 0
-        for i in indexes:
-            n = i - o
-            tracks[n-1]['end'] = tracks[n]['end']
+def join_tracks(start_index: int, count: int = 2):
+    def join_track_(tracks):
+        end_index = start_index + count - 1
+        tracks[start_index]['end'] = tracks[end_index]['end']
+        for n in range(end_index, start_index, -1):
             del tracks[n]
-            o += 1
         return tracks
-    return concat_track_
+    return join_track_
 
 def reindex(tracks):
     for n, track in enumerate(tracks):
@@ -166,13 +164,17 @@ class Counter:
         self.number += 1
         return number
 class TNumber(Titleizer):
-    def __init__(self, prefix='Chapter', counter=Counter()):
+    def __init__(self, prefix='Chapter', counter=Counter(), names: list[str] | None = None):
         self.prefix = prefix
         self.counter = counter
+        self.names = names
     def match(self, track, count):
         return True
     def update(self, track):
-        track['title'] = f'{self.prefix} {self.counter.touch()}'
+        n = self.counter.touch()
+        track['title'] = f'{self.prefix} {n}'
+        if self.names and n <= len(self.names):
+            track['title'] += f' - {self.names[n-1]}'
         return track
 class TTransform(Titleizer):
     def __init__(self, title_transform: Callable[[str], str] | None = None, index: int | None = None):
@@ -290,8 +292,6 @@ for track in tracks:
     print(' '.join(command))
     if execute:
         print(subprocess.run(command))
-    # if n == 3:
-    #     break
 
 if not execute:
     print("WARNING: This was only a dry run, use the '-e' flag to execute")
