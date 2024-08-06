@@ -54,13 +54,15 @@ def sort_adjust(start_names, end_names, key='name'):
 		return start + mid + end
 	return sort_adjust_
 
-def numerate(files):
+def numerate(base: int = 0):
+	def numerate_(files):
 	size = len(str(len(files)))
 	def num(n):
 		return '0' * (size-len(str(n))) + str(n)
 	for n,file in enumerate(files):
-		file['name'] = num(n) + ' - ' + file['name']
+			file['name'] = num(base + n) + ' - ' + file['name']
 	return files
+	return numerate_
 
 def replace_re(regexp, sub):
 	regex = re.compile(regexp)

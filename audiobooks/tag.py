@@ -72,9 +72,11 @@ for modifier in modifiers:
 tracks = len(files)
 
 for file in files:
-	command = 'id3tag --artist="{0}" --album="{1}" --song="{2}" --track={3} --total={4} "{5}"'.format(series, book, file['name'], file['index'], tracks, os.path.join(path, file['filename']))
+	file_path = os.path.join(path, file['filename'])
+	command = 'id3tag -1 --artist="{0}" --album="{1}" --song="{2}" --track={3} --total={4} "{5}"'.format(series, book, file['name'], file['index'], tracks, file_path)
 	print(command)
 	if execute:
+		os.system(f'id3v2 -D "{file_path}"')
 		os.system(command)
 
 if not execute:

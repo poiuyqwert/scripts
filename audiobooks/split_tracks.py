@@ -13,16 +13,22 @@ if not os.path.exists(path):
 
 execute = args[-1] == '-e'
 
-def fix_endings(tracks, duration):
+class Track(TypedDict):
+    index: int
+    title: str
+    start: float
+    end: float
+
+def fix_endings(tracks: list[Track], duration: float):
     for n in range(len(tracks)-1):
         tracks[n]['end'] = tracks[n+1]['start']
     tracks[-1]['end'] = duration
     return tracks
 
-def parse_cue(cue):
+def parse_cue(cue) -> list[Track]:
     RE_TRACK = re.compile(r'TRACK (\d+) AUDIO\s+(?:: +)?TITLE "([^"]+)"\s+(?:: +)?INDEX \d+ (\d+):(\d+):(\d+)', re.S)
 
-    tracks = []
+    tracks: list[Track] = []
     for match in RE_TRACK.finditer(cue):
         index, title, minutes, seconds, frames = match.groups()
         start_seconds = int(minutes) * 60 + int(seconds) #+ int(frames) / 75.0
@@ -34,20 +40,20 @@ def parse_cue(cue):
         })
     return tracks
 
-def tracks_from_cue(cue_path):
+def tracks_from_cue(cue_path) -> list[Track]:
     with open(cue_path, 'r') as f:
         cue = f.read()
 
     return parse_cue(cue)
 
-def tracks_from_m4b(m4b_path):
+def tracks_from_m4b(m4b_path) -> list[Track]:
     command = ['ffprobe', m4b_path]
     result = subprocess.run(command, capture_output=True, text=True)
     probe = result.stdout or result.stderr
 
     RE_TRACK = re.compile(r'Chapter #0:(\d+): start ([\d\.]+), end ([\d\.]+)[^:]+?:\s+title +: +([^\n]+)?', re.S)
 
-    tracks = []
+    tracks: list[Track] = []
     for match in RE_TRACK.finditer(probe):
         index, start_seconds, end_seconds, title = match.groups()
         tracks.append({
@@ -58,7 +64,7 @@ def tracks_from_m4b(m4b_path):
         })
     return tracks
 
-def tracks_from_mp3(mp3_path):
+def tracks_from_mp3(mp3_path) -> list[Track]:
     command = ['ffprobe', mp3_path]
     result = subprocess.run(command, capture_output=True, text=True)
     probe = result.stdout or result.stderr
@@ -71,23 +77,33 @@ def tracks_from_mp3(mp3_path):
 
     RE_DURATION = re.compile(r'^ +Duration: (\d+):(\d+):(\d+)', re.M)
     match = RE_DURATION.search(probe)
+    if not match:
+        raise Exception("Couldn't find mp3 duration")
     duration = (int(match.group(1)) * 60 + int(match.group(2))) * 60 + int(match.group(3))
 
-    tracks = fix_endings(tracks, duration)
+    if len(tracks):
+        tracks = fix_endings(tracks, duration)
+    else:
+        tracks.append({
+            'index': 0,
+            'start': 0,
+            'end': duration,
+            'title': os.path.splitext(os.path.basename(path))[0]
+        })
     return tracks
 
-def sort(tracks):
+def sort(tracks: list[Track]) -> list[Track]:
     return sorted(tracks, key=lambda track: track['index'])
 
 def set_titles(titles):
-    def set_titles_(tracks):
+    def set_titles_(tracks) -> list[Track]:
         for n, track in enumerate(tracks):
             track[n]['title'] = titles[n]
         return tracks  
     return set_titles_
 
 def join_short(min_dur):
-    def join_short_(tracks):
+    def join_short_(tracks: list[Track]) -> list[Track]:
         n = 1
         while n < len(tracks):
             track = tracks[n]
@@ -103,7 +119,7 @@ def join_short(min_dur):
     return join_short_
 
 def join_tracks(start_index: int, count: int = 2):
-    def join_track_(tracks):
+    def join_track_(tracks: list[Track]) -> list[Track]:
         end_index = start_index + count - 1
         tracks[start_index]['end'] = tracks[end_index]['end']
         for n in range(end_index, start_index, -1):
@@ -111,18 +127,20 @@ def join_tracks(start_index: int, count: int = 2):
         return tracks
     return join_track_
 
-def reindex(tracks):
-    for n, track in enumerate(tracks):
-        track['index'] = n
-    return tracks
+def reindex(base: int):
+    def reindex_(tracks: list[Track]) -> list[Track]:
+        for n, track in enumerate(tracks):
+            track['index'] = base + n
+        return tracks
+    return reindex_
 
 def secs(h,m,s):
     return s + (m + (h * 60)) * 60
 def add_split(seconds: float, title1: str | None = None, title2: str | None = None):
-    def add_split_(tracks):
+    def add_split_(tracks: list[Track]) -> list[Track]:
         for n in range(len(tracks)):
             if seconds > tracks[n]['start'] and (tracks[n]['end'] is None or seconds < tracks[n]['end']):
-                new_track = dict(tracks[n])
+                new_track: Track = tracks[n].copy()
                 new_track['end'] = seconds
                 if title1:
                     new_track['title'] = title1
@@ -135,9 +153,9 @@ def add_split(seconds: float, title1: str | None = None, title2: str | None = No
     return add_split_
 
 class Titleizer:
-    def match(self, track, count):
+    def match(self, track: Track, count: int) -> bool:
         return False
-    def update(self, track):
+    def update(self, track: Track) -> Track:
         return track
 class TSet(Titleizer):
     def __init__(self, title, index=None):
@@ -191,7 +209,7 @@ class TTransform(Titleizer):
             track['title'] = self.title_transform(track['title'])
         return track
 def titleize(defs: list[Titleizer]):
-    def titleize_(tracks: list[dict]) -> list[dict]:
+    def titleize_(tracks: list[Track]) -> list[Track]:
         active: Titleizer | None = None
         next: Titleizer | None = defs.pop(0)
         for n in range(len(tracks)):
@@ -205,18 +223,18 @@ def titleize(defs: list[Titleizer]):
     return titleize_
 
 def only_keep(indexes, offset=1):
-    def only_keep_(tracks):
+    def only_keep_(tracks: list[Track]) -> list[Track]:
         return list(track for track in tracks if track['index']+offset in indexes)
     return only_keep_
 
 def drop(indexes, offset=1):
-    def drop_(tracks):
+    def drop_(tracks: list[Track]) -> list[Track]:
         ids = list((i if i > 0 else i + len(tracks)) for i in indexes)
         return list(track for track in tracks if track['index']+offset not in ids)
     return drop_
 
 def trim(seconds):
-    def trim_(tracks):
+    def trim_(tracks: list[Track]) -> list[Track]:
         if seconds < 0:
             tracks[-1]['end'] += seconds
         else:
@@ -225,7 +243,7 @@ def trim(seconds):
     return trim_
 
 def trim_track(track_n: int, seconds: float):
-    def trim_track_(tracks):
+    def trim_track_(tracks: list[Track]) -> list[Track]:
         if seconds < 0:
             tracks[track_n]['end'] += seconds
         else:
@@ -233,9 +251,15 @@ def trim_track(track_n: int, seconds: float):
         return tracks
     return trim_track_
 
+def trim_track_to(track_n: int, seconds: float):
+    def trim_track_(tracks: list[Track]) -> list[Track]:
+        tracks[track_n]['end'] = tracks[track_n]['start'] + seconds
+        return tracks
+    return trim_track_
+
 def split_track(track_n: int, seconds: float, title1: str | None = None, title2: str | None = None):
-    def split_track_(tracks):
-        new_track = dict(tracks[track_n])
+    def split_track_(tracks: list[Track]) -> list[Track]:
+        new_track = tracks[track_n].copy()
         if seconds < 0:
             new_track['end'] += seconds
         else:
@@ -253,14 +277,14 @@ def split_track(track_n: int, seconds: float, title1: str | None = None, title2:
     return split_track_
 
 def shift_forward(track_n: int, split_at_seconds: float):
-    def shift_(tracks):
+    def shift_(tracks: list[Track]) -> list[Track]:
         tracks[track_n-1]['end'] += split_at_seconds
         tracks[track_n]['start'] += split_at_seconds
         return tracks
     return shift_
 
 def shift_back(track_n: int, split_at_seconds: float):
-    def shift_(tracks):
+    def shift_(tracks: list[Track]) -> list[Track]:
         duration = tracks[track_n]['end'] - tracks[track_n]['start'] - split_at_seconds
         tracks[track_n+1]['start'] -= duration
         tracks[track_n]['end'] -= duration
@@ -268,7 +292,7 @@ def shift_back(track_n: int, split_at_seconds: float):
     return shift_
 
 def rename(regex, repl: str | Callable[[re.Match[str]], str]):
-    def rename_(tracks):
+    def rename_(tracks: list[Track]) -> list[Track]:
         regex_compiled = re.compile(regex)
         for track in tracks:
             track['title'] = regex_compiled.sub(repl, track['title'])
@@ -276,56 +300,22 @@ def rename(regex, repl: str | Callable[[re.Match[str]], str]):
     return rename_
 
 def set_title(track_n: int, title: str):
-    def set_title_(tracks):
+    def set_title_(tracks: list[Track]) -> list[Track]:
         tracks[track_n]['title'] = title
         return tracks
     return set_title_
 
 counter = Counter()
-modifiers = [
-    sort,
-    trim(1.5),
-    set_title(0, 'Intro'),
-    set_title(-1, 'Outro'),
-    rename(r'([A-Z ]+):', lambda m: m.group(1).title() + ' -'),
-    rename(r'0+([1-9]+)', '\\1'),
-
-    shift_back(3, 5),
-    shift_back(4, secs(0, 26, 49)),
-    shift_back(5, secs(0, 11, 1)),
-    shift_back(6, secs(0, 33, 45)),
-    shift_back(7, secs(0, 22, 32)),
-    shift_back(8, secs(0, 44, 18)),
-    shift_back(9, secs(0, 4, 10)),
-    shift_back(10, secs(0, 10, 59)),
-    shift_back(11, secs(0, 26, 6)),
-    shift_back(12, secs(0, 10, 36)),
-    shift_back(13, secs(0, 28, 44)),
-    shift_back(14, secs(0, 18, 45)),
-    shift_back(15, secs(0, 36, 16)),
-
-    shift_back(17, 6),
-    shift_back(18, secs(0, 25, 6)),
-    shift_back(19, secs(0, 15, 36)),
-    shift_back(20, secs(0, 37, 43)),
-    shift_back(21, secs(0, 12, 57)),
-    shift_back(22, secs(0, 14, 52)),
-    shift_back(23, secs(0, 11, 28)),
-    shift_back(24, secs(0, 13, 42)),
-    shift_back(25, secs(0, 28, 0)),
-    shift_back(26, secs(0, 9, 1)),
-    shift_back(27, secs(0, 9, 25)),
-    shift_back(28, secs(0, 8, 30)),
-    shift_back(29, secs(0, 19, 4)),
-    shift_back(30, secs(0, 19, 30)),
-    shift_back(31, secs(0, 33, 44)),
-    shift_back(32, secs(0, 17, 13)),
-    shift_back(33, secs(0, 26, 1)),
-    shift_back(34, secs(0, 32, 17)),
-    shift_back(35, secs(0, 23, 9)),
-    shift_back(36, secs(0, 42, 46)),
-
-    shift_back(38, 5),
+modifiers: list[Callable[[list[Track]], list[Track]]] = [
+    # trim(3),
+    # set_title(0, 'Intro'),
+    # split_track(0, 11, title2='Dedications'),
+    # split_track(1, 7, title2='Chapter 1'),
+    # reindex,
+    split_track(0, secs(0, 13, 56), 'Chapter 30', 'Outro'),
+    reindex(32),
+    trim_track(-1, -5),
+    # 15,56
 ]
 
 if path.endswith('m4b'):
@@ -350,23 +340,18 @@ def hash_file(path: str) -> hashlib._Hash:
             sha1.update(data)
     return sha1
 
-def hash_track(track: dict[str, str | int]) -> hashlib._Hash:
+def hash_track(track: Track) -> hashlib._Hash:
     sha1 = hashlib.sha1()
     for (key, value) in sorted(track.items(), key=lambda kv: kv[0]):
         sha1.update(key.encode())
         sha1.update(str(value).encode())
     return sha1
 
+class PastInput(TypedDict):
+    path: str
+    hash: str
 class Past(TypedDict):
-    class Input(TypedDict):
-        path: str
-        hash: str
-    class Track(TypedDict):
-        index: int
-        title: str
-        start: float
-        end: float
-    input: Input
+    input: PastInput
     tracks: list[Track]
 
 past: Past | None = None
@@ -391,7 +376,7 @@ for track in tracks:
 
     track_changed = True
     if os.path.exists(output_path) and past is not None:
-        past_track: Past.Track | None = next(filter(lambda t: t['index'] == track['index'], past['tracks']))
+        past_track: Track | None = next(filter(lambda t: t['index'] == track['index'], past['tracks']))
         if past_track is not None:
             track_hash = hash_track(track)
             past_hash = hash_track(past_track)
